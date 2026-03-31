@@ -6,6 +6,13 @@ const {
   updatePositionMeta,
   closePosition,
 } = require('./db');
+const { buildFeaturesFromCandles } = require('./indicators');
+const { getEntryDecision, getExitDecision } = require('./aiAdvisor');
+
+const exchange = require(
+  config.exchange === 'bithumb' ? './bithumb' : './upbit'
+);
+
 const {
   getMinuteCandles,
   getAccounts,
@@ -15,9 +22,7 @@ const {
   marketSell,
   findBalance,
   getBaseCurrency,
-} = require('./upbit');
-const { buildFeaturesFromCandles } = require('./indicators');
-const { getEntryDecision, getExitDecision } = require('./aiAdvisor');
+} = exchange;
 
 function nowSeoul() {
   return new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Seoul' }));
@@ -43,6 +48,7 @@ function clamp(value, min, max) {
 async function buildMarketFeature(market) {
   const candles = await getMinuteCandles(market, 1, 200);
   const f = buildFeaturesFromCandles(candles, config.bot.rsiPeriod);
+
   return {
     market,
     ...f,
@@ -60,32 +66,25 @@ async function getOrderExecutedAverage(uuid, fallbackPrice, fallbackVolume) {
   try {
     const order = await getOrder(uuid);
 
-    const executedVolume = Number(order.executed_volume || 0);
-    const paidFee = Number(order.paid_fee || 0);
-    const price = Number(order.price || fallbackPrice);
+    const executedVolume =
+      Number(order.executed_volume || 0) ||
+      Number(order.volume || 0) ||
+      fallbackVolume;
 
-    if (order.trades_count && Array.isArray(order.trades) && order.trades.length) {
-      let totalFunds = 0;
-      let totalVolume = 0;
+    const executedFunds =
+      Number(order.executed_funds || 0) ||
+      Number(order.price || 0) * Number(order.executed_volume || 0);
 
-      for (const t of order.trades) {
-        totalFunds += Number(t.funds || 0);
-        totalVolume += Number(t.volume || 0);
-      }
-
-      if (totalVolume > 0) {
-        return {
-          avgPrice: totalFunds / totalVolume,
-          volume: totalVolume,
-          paidFee,
-        };
-      }
+    if (executedVolume > 0 && executedFunds > 0) {
+      return {
+        avgPrice: executedFunds / executedVolume,
+        volume: executedVolume,
+      };
     }
 
     return {
-      avgPrice: price || fallbackPrice,
+      avgPrice: fallbackPrice,
       volume: executedVolume || fallbackVolume,
-      paidFee,
     };
   } catch (err) {
     return {
@@ -147,26 +146,42 @@ async function tryOpenPosition() {
   const accounts = await getAccounts();
   const krwBalance = findBalance(accounts, 'KRW');
 
-  if (krwBalance <= config.bot.krwReserve) {
+  const candidates = await scanMarketsForEntry(accounts);
+
+  if (!candidates.length) {
     await writeLog({
       market: 'SYSTEM',
-      actionType: 'SKIP_BUY',
+      actionType: 'NO_CANDIDATE',
       krwBalance,
-      message: 'KRW 잔고 부족',
+      message: '진입 후보 없음',
     });
     return;
   }
 
-  const candidates = await scanMarketsForEntry(accounts);
-  if (!candidates.length) return;
-
   const target = candidates[0];
   const { feature, ai } = target;
 
-  const chance = await getOrderChance(feature.market);
-  const minBidTotal = Number(chance.market.bid.min_total);
+  if (krwBalance <= config.bot.krwReserve) {
+    await writeLog({
+      market: feature.market,
+      actionType: 'SKIP_BUY',
+      price: feature.latestPrice,
+      rsiValue: feature.rsi,
+      krwBalance,
+      message: 'KRW 잔고 부족 - 후보는 있으나 매수 불가',
+      rawJson: { feature, ai },
+    });
+    return;
+  }
 
-  const orderKrw = Math.floor(krwBalance - config.bot.krwReserve);
+  const chance = await getOrderChance(feature.market);
+  const minBidTotal = Number(chance?.market?.bid?.min_total || 5000);
+
+  const availableKrw = Math.floor(krwBalance - config.bot.krwReserve);
+  const orderKrw = config.bot.maxBuyKrw > 0
+    ? Math.min(availableKrw, config.bot.maxBuyKrw)
+    : availableKrw;
+
   if (orderKrw < minBidTotal) {
     await writeLog({
       market: feature.market,
@@ -175,7 +190,7 @@ async function tryOpenPosition() {
       rsiValue: feature.rsi,
       krwBalance,
       message: `최소 매수 금액 미만: ${orderKrw} < ${minBidTotal}`,
-      rawJson: { chance },
+      rawJson: { chance, feature, ai },
     });
     return;
   }
@@ -225,8 +240,8 @@ async function tryOpenPosition() {
     rsiValue: feature.rsi,
     krwBalance,
     message: config.bot.dryRun
-      ? `[DRY_RUN] score=${ai.score}, risk=${ai.risk_level}, softStop=${softStopPrice}, softTake=${softTakePrice}`
-      : `score=${ai.score}, risk=${ai.risk_level}, softStop=${softStopPrice}, softTake=${softTakePrice}`,
+      ? `[DRY_RUN] score=${ai.score}, risk=${ai.risk_level}, orderKrw=${orderKrw}, softStop=${softStopPrice}, softTake=${softTakePrice}`
+      : `score=${ai.score}, risk=${ai.risk_level}, orderKrw=${orderKrw}, softStop=${softStopPrice}, softTake=${softTakePrice}`,
     rawJson: { feature, ai, orderResult, executed },
   });
 }
@@ -331,7 +346,7 @@ async function tryManageOpenPosition() {
   const pnlPercent = getPnlPercent(Number(position.buy_price), currentPrice);
 
   const chance = await getOrderChance(position.market);
-  const minAskTotal = Number(chance.market.ask.min_total);
+  const minAskTotal = Number(chance?.market?.ask?.min_total || 5000);
   const estimatedAskTotal = currentPrice * coinBalance;
 
   if (estimatedAskTotal < minAskTotal) {

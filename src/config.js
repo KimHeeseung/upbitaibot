@@ -15,16 +15,28 @@ function bool(name, defaultValue = false) {
   return raw === 'true' || raw === '1' || raw === 'y';
 }
 
+const exchangeName = (process.env.EXCHANGE || 'upbit').toLowerCase();
+
 const config = {
+  exchange: exchangeName,
+
   upbit: {
-    accessKey: process.env.UPBIT_ACCESS_KEY,
-    secretKey: process.env.UPBIT_SECRET_KEY,
+    accessKey: process.env.UPBIT_ACCESS_KEY || '',
+    secretKey: process.env.UPBIT_SECRET_KEY || '',
     baseUrl: 'https://api.upbit.com',
   },
+
+  bithumb: {
+    accessKey: process.env.BITHUMB_ACCESS_KEY || '',
+    secretKey: process.env.BITHUMB_SECRET_KEY || '',
+    baseUrl: 'https://api.bithumb.com',
+  },
+
   openai: {
     apiKey: process.env.OPENAI_API_KEY,
     model: process.env.OPENAI_MODEL || 'gpt-5-mini',
   },
+
   db: {
     host: process.env.DB_HOST || '127.0.0.1',
     port: num('DB_PORT', 3306),
@@ -33,6 +45,7 @@ const config = {
     database: process.env.DB_NAME || 'autotrade',
     connLimit: num('DB_CONN_LIMIT', 10),
   },
+
   bot: {
     markets: (process.env.MARKETS || 'KRW-BTC')
       .split(',')
@@ -59,6 +72,7 @@ const config = {
     trailingStopMax: num('TRAILING_STOP_MAX', 2.0),
 
     krwReserve: num('KRW_RESERVE', 1000),
+    maxBuyKrw: num('MAX_BUY_KRW', 0),
   },
 };
 

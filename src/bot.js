@@ -17,14 +17,22 @@ async function oneCycle() {
 }
 
 async function start() {
-  if (!config.upbit.accessKey || !config.upbit.secretKey) {
-    throw new Error('UPBIT_ACCESS_KEY / UPBIT_SECRET_KEY 확인 필요');
+  if (config.exchange === 'bithumb') {
+    if (!config.bithumb.accessKey || !config.bithumb.secretKey) {
+      throw new Error('BITHUMB_ACCESS_KEY / BITHUMB_SECRET_KEY 확인 필요');
+    }
+  } else {
+    if (!config.upbit.accessKey || !config.upbit.secretKey) {
+      throw new Error('UPBIT_ACCESS_KEY / UPBIT_SECRET_KEY 확인 필요');
+    }
   }
+
   if (!config.openai.apiKey) {
     throw new Error('OPENAI_API_KEY 확인 필요');
   }
 
-  console.log('=== Upbit AI Hybrid Trader Start ===');
+  console.log('=== AI Hybrid Trader Start ===');
+  console.log('EXCHANGE:', config.exchange);
   console.log('MARKETS:', config.bot.markets.join(', '));
   console.log('DRY_RUN:', config.bot.dryRun);
   console.log('LOOP_SECONDS:', config.bot.loopSeconds);
@@ -32,7 +40,7 @@ async function start() {
   await writeLog({
     market: 'SYSTEM',
     actionType: 'START',
-    message: `bot started / dryRun=${config.bot.dryRun}`,
+    message: `bot started / exchange=${config.exchange} / dryRun=${config.bot.dryRun}`,
   });
 
   while (true) {
@@ -60,4 +68,18 @@ async function start() {
   }
 }
 
-start();
+start().catch(async (err) => {
+  console.error('[FATAL]', err.message);
+
+  try {
+    await writeLog({
+      market: 'SYSTEM',
+      actionType: 'FATAL',
+      message: err.message,
+    });
+  } catch (logErr) {
+    console.error('[FATAL LOG ERROR]', logErr.message);
+  }
+
+  process.exit(1);
+});

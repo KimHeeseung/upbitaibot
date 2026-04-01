@@ -14,6 +14,9 @@ const exchange = require(
 );
 
 const {
+  getAllMarkets,
+  getWarningMarkets,
+  getTickers,
   getMinuteCandles,
   getAccounts,
   getOrderChance,
@@ -81,6 +84,54 @@ function getPreCandidateScore(feature) {
   );
 }
 
+function getTickerScore(ticker) {
+  const accTradePrice = Number(
+    ticker.acc_trade_price_24h ||
+    ticker.acc_trade_price ||
+    0
+  );
+
+  const signedChangePct = Number(
+    (ticker.signed_change_rate || 0) * 100
+  );
+
+  const tradePrice = Number(ticker.trade_price || 0);
+
+  return (
+    (Math.log10(Math.max(accTradePrice, 1)) * 20) +
+    (signedChangePct * 1.5) +
+    (tradePrice > 0 ? 5 : 0)
+  );
+}
+
+function normalizeMarketRows(rows = []) {
+  return rows.map((row) => {
+    if (typeof row === 'string') {
+      return { market: row, warning: false };
+    }
+
+    const ev = row.market_event || {};
+    return {
+      market: row.market,
+      warning: ev.warning === true || ev.caution === true,
+      raw: row,
+    };
+  });
+}
+
+function normalizeTickerRow(row) {
+  return {
+    market: row.market,
+    trade_price: Number(row.trade_price || 0),
+    signed_change_rate: Number(row.signed_change_rate || 0),
+    acc_trade_price_24h: Number(
+      row.acc_trade_price_24h ||
+      row.acc_trade_price ||
+      0
+    ),
+  };
+}
+
 function isSidewaysMarket(feature) {
   return (
     Math.abs(Number(feature.price5mChange || 0)) <= 0.2 &&
@@ -90,20 +141,18 @@ function isSidewaysMarket(feature) {
 }
 
 function getSidewaysExitMinutes(pnlPercent) {
-  // 수익이 적으면 더 오래 보고, 수익이 크면 조금 빨리 정리
   if (pnlPercent >= 1.5) return 30;
   if (pnlPercent >= 0.7) return 35;
   return 45;
 }
 
 async function buildMarketFeature(market) {
-  // 속도 개선: 200 -> 120
   const candles = await getMinuteCandles(market, 1, 120);
-  const f = buildFeaturesFromCandles(candles, config.bot.rsiPeriod);
+  const feature = buildFeaturesFromCandles(candles, config.bot.rsiPeriod);
 
   return {
     market,
-    ...f,
+    ...feature,
   };
 }
 
@@ -127,6 +176,23 @@ async function getOrderExecutedAverage(uuid, fallbackPrice, fallbackVolume) {
       Number(order.executed_funds || 0) ||
       (Number(order.price || 0) * Number(order.executed_volume || 0));
 
+    if (Array.isArray(order.trades) && order.trades.length) {
+      let totalFunds = 0;
+      let totalVolume = 0;
+
+      for (const trade of order.trades) {
+        totalFunds += Number(trade.funds || 0);
+        totalVolume += Number(trade.volume || 0);
+      }
+
+      if (totalVolume > 0) {
+        return {
+          avgPrice: totalFunds / totalVolume,
+          volume: totalVolume,
+        };
+      }
+    }
+
     if (executedVolume > 0 && executedFunds > 0) {
       return {
         avgPrice: executedFunds / executedVolume,
@@ -146,11 +212,104 @@ async function getOrderExecutedAverage(uuid, fallbackPrice, fallbackVolume) {
   }
 }
 
+async function resolveScanMarkets() {
+  if (!config.bot.useAllKrwMarkets) {
+    return config.bot.markets;
+  }
+
+  const allRows = await getAllMarkets(true);
+  const normalized = normalizeMarketRows(allRows);
+
+  let markets = normalized
+    .filter((item) => typeof item.market === 'string' && item.market.startsWith('KRW-'));
+
+  if (config.bot.excludeWarningMarkets) {
+    markets = markets.filter((item) => !item.warning);
+
+    try {
+      const warningMarkets = new Set(await getWarningMarkets());
+      markets = markets.filter((item) => !warningMarkets.has(item.market));
+    } catch (err) {
+      // ignore
+    }
+  }
+
+  return markets.map((item) => item.market);
+}
+
 async function scanMarketsForEntry(accounts) {
   const krwBalance = findBalance(accounts, 'KRW');
 
+  const scanMarkets = await resolveScanMarkets();
+
+  if (!scanMarkets.length) {
+    await writeLog({
+      market: 'SYSTEM',
+      actionType: 'NO_MARKET',
+      krwBalance,
+      message: '검색 대상 마켓 없음',
+    });
+    return [];
+  }
+
+  let firstPassMarkets = scanMarkets;
+
+  try {
+    const tickerRows = await getTickers(scanMarkets);
+    const normalizedTickers = tickerRows
+      .map(normalizeTickerRow)
+      .filter((row) => row.market && row.market.startsWith('KRW-'));
+
+    const filteredTickers = normalizedTickers
+      .filter((row) => {
+        const accTradePrice = Number(row.acc_trade_price_24h || 0);
+        const signedChangePct = Number(row.signed_change_rate || 0) * 100;
+
+        return (
+          accTradePrice >= config.bot.min24hTradePrice &&
+          signedChangePct >= config.bot.minSignedChangePct &&
+          signedChangePct <= config.bot.maxSignedChangePct
+        );
+      })
+      .sort((a, b) => getTickerScore(b) - getTickerScore(a))
+      .slice(0, config.bot.preTickerTopCount);
+
+    if (filteredTickers.length) {
+      firstPassMarkets = filteredTickers.map((row) => row.market);
+
+      const topTicker = filteredTickers[0];
+      await writeLog({
+        market: topTicker.market,
+        actionType: 'PRE_TICKER_TOP',
+        price: topTicker.trade_price,
+        krwBalance,
+        message:
+          `24h=${topTicker.acc_trade_price_24h}` +
+          ` / signedChangePct=${(topTicker.signed_change_rate * 100).toFixed(2)}`,
+        rawJson: topTicker,
+      });
+    } else {
+      await writeLog({
+        market: 'SYSTEM',
+        actionType: 'NO_PRE_TICKER',
+        krwBalance,
+        message: '1차 티커 필터 통과 종목 없음',
+      });
+      return [];
+    }
+  } catch (err) {
+    await writeLog({
+      market: 'SYSTEM',
+      actionType: 'TICKER_FALLBACK',
+      krwBalance,
+      message: `ticker 1차 필터 실패 -> 직접 분봉 스캔 사용 / ${err.message}`,
+    });
+
+    firstPassMarkets = scanMarkets.slice(0, config.bot.preTickerTopCount);
+  }
+
   const featureResults = await Promise.all(
-    config.bot.markets.map(async (market) => {
+    firstPassMarkets.map(async (market) => {
       try {
         const feature = await buildMarketFeature(market);
         return { market, feature, error: null };
@@ -177,19 +336,21 @@ async function scanMarketsForEntry(accounts) {
     .filter((feature) => {
       return (
         feature.rsi <= 78 &&
-        feature.volumeRatio >= 0.05 &&
+        feature.volumeRatio >= config.bot.minVolumeRatio &&
         feature.price15mChange >= -4 &&
-        feature.price15mChange <= 25
+        feature.price15mChange <= 25 &&
+        feature.volatilityPct <= config.bot.maxVolatilityPct
       );
     })
-    .sort((a, b) => getPreCandidateScore(b) - getPreCandidateScore(a));
+    .sort((a, b) => getPreCandidateScore(b) - getPreCandidateScore(a))
+    .slice(0, config.bot.topCandidateCount);
 
   if (!preCandidates.length) {
     await writeLog({
       market: 'SYSTEM',
       actionType: 'NO_PRE_CANDIDATE',
       krwBalance,
-      message: '1차 필터 통과 종목 없음',
+      message: '분봉 1차 필터 통과 종목 없음',
     });
     return [];
   }
@@ -201,11 +362,15 @@ async function scanMarketsForEntry(accounts) {
     price: topPre.latestPrice,
     rsiValue: topPre.rsi,
     krwBalance,
-    message: `volumeRatio=${Number(topPre.volumeRatio || 0).toFixed(2)}, price5mChange=${Number(topPre.price5mChange || 0).toFixed(2)}, price15mChange=${Number(topPre.price15mChange || 0).toFixed(2)}, regime=${topPre.regime}`,
+    message:
+      `volumeRatio=${Number(topPre.volumeRatio || 0).toFixed(2)}` +
+      `, price5mChange=${Number(topPre.price5mChange || 0).toFixed(2)}` +
+      `, price15mChange=${Number(topPre.price15mChange || 0).toFixed(2)}` +
+      `, regime=${topPre.regime}`,
     rawJson: topPre,
   });
 
-  const aiTargets = preCandidates.slice(0, Math.min(preCandidates.length, 3));
+  const aiTargets = preCandidates.slice(0, config.bot.aiTargetCount);
 
   const aiResults = await Promise.all(
     aiTargets.map(async (feature) => {
@@ -253,7 +418,9 @@ async function scanMarketsForEntry(accounts) {
       rejectedReason = `action_reject:${ai.action}`;
     } else if (ai.score < dynamicScoreMin) {
       rejectedReason = `score_reject:${ai.score}<${dynamicScoreMin}`;
-    } else if (feature.rsi > Math.max(62, Number(config.bot.buyRsiMax || 55) + 7)) {
+    } else if (
+      feature.rsi > Math.max(62, Number(config.bot.buyRsiMax || 55) + 7)
+    ) {
       rejectedReason = `rsi_reject:${feature.rsi}`;
     } else if (
       ai.risk_level === 'high' &&
@@ -299,7 +466,10 @@ async function scanMarketsForEntry(accounts) {
       price: candidates[0].feature.latestPrice,
       rsiValue: candidates[0].feature.rsi,
       krwBalance,
-      message: `top score=${candidates[0].ai.score}, action=${candidates[0].ai.action}, risk=${candidates[0].ai.risk_level}`,
+      message:
+        `top score=${candidates[0].ai.score}` +
+        `, action=${candidates[0].ai.action}` +
+        `, risk=${candidates[0].ai.risk_level}`,
       rawJson: candidates[0],
     });
   }
@@ -369,13 +539,10 @@ async function tryOpenPosition() {
   const buyPrice = Number(executed.avgPrice || feature.latestPrice);
   const buyVolume = Number(executed.volume || estimatedVolume);
 
-  const hardStopPercent = Number(config.bot.hardStopPercent || 5);
-  const hardTakePercent = Number(config.bot.hardTakePercent || 5);
-
-  const softStopPrice = buyPrice * (1 - hardStopPercent / 100);
-  const softTakePrice = buyPrice * (1 + 0.3 / 100);
-  const hardStopPrice = buyPrice * (1 - hardStopPercent / 100);
-  const hardTakePrice = buyPrice * (1 + hardTakePercent / 100);
+  const softStopPrice = buyPrice * (1 - config.bot.softStopPercent / 100);
+  const softTakePrice = buyPrice * (1 + config.bot.softTakePercent / 100);
+  const hardStopPrice = buyPrice * (1 - config.bot.hardStopPercent / 100);
+  const hardTakePrice = buyPrice * (1 + config.bot.hardTakePercent / 100);
 
   await openPosition({
     market: feature.market,
@@ -404,9 +571,11 @@ async function tryOpenPosition() {
     price: buyPrice,
     rsiValue: feature.rsi,
     krwBalance,
-    message: config.bot.dryRun
-      ? `[DRY_RUN] score=${ai.score}, risk=${ai.risk_level}, orderKrw=${orderKrw}, hardStop=${hardStopPrice}, hardTake=${hardTakePrice}`
-      : `score=${ai.score}, risk=${ai.risk_level}, orderKrw=${orderKrw}, hardStop=${hardStopPrice}, hardTake=${hardTakePrice}`,
+    message:
+      `${config.bot.dryRun ? '[DRY_RUN] ' : ''}` +
+      `score=${ai.score}, risk=${ai.risk_level}, orderKrw=${orderKrw}` +
+      `, softStop=${softStopPrice}, softTake=${softTakePrice}` +
+      `, hardStop=${hardStopPrice}, hardTake=${hardTakePrice}`,
     rawJson: { feature, ai, orderResult, executed },
   });
 }
@@ -482,6 +651,16 @@ async function handleTrailing(position, feature, coinBalance) {
   return false;
 }
 
+function isAiHoldStillActive(position) {
+  if (!position.ai_hold_until) return false;
+
+  const now = nowSeoul();
+  const until = new Date(position.ai_hold_until);
+
+  if (Number.isNaN(until.getTime())) return false;
+  return now < until;
+}
+
 async function tryManageOpenPosition() {
   const position = await getOpenPosition();
   if (!position) return;
@@ -530,32 +709,50 @@ async function tryManageOpenPosition() {
   const hardStopPrice = Number(position.hard_stop_price || 0);
   const hardTakePrice = Number(position.hard_take_price || 0);
 
-  // 1) 손실은 -5%까지 버티고 그때만 손절
-  if (currentPrice <= hardStopPrice || pnlPercent <= -5) {
+  if (currentPrice <= hardStopPrice || pnlPercent <= -config.bot.hardStopPercent) {
     await forceClosePosition(
       position,
       currentPrice,
       coinBalance,
-      'HARD_STOP_-5',
+      'HARD_STOP',
       { pnlPercent, holdMinutes }
     );
     return;
   }
 
-  // 2) 5% 수익 도달 시 익절
-  if (currentPrice >= hardTakePrice || pnlPercent >= 5) {
+  if (currentPrice >= hardTakePrice || pnlPercent >= config.bot.hardTakePercent) {
     await forceClosePosition(
       position,
       currentPrice,
       coinBalance,
-      'HARD_TAKE_5',
+      'HARD_TAKE',
       { pnlPercent, holdMinutes }
     );
     return;
   }
 
-  // 3) 0.3% 미만은 수수료 구간이라 절대 익절 안 함
-  if (pnlPercent < 0.3) {
+  if (isAiHoldStillActive(position)) {
+    await writeLog({
+      market: position.market,
+      actionType: 'AI_HOLD',
+      price: currentPrice,
+      rsiValue: feature.rsi,
+      coinBalance,
+      pnlPercent,
+      message: `ai_hold_until=${position.ai_hold_until}`,
+    });
+    return;
+  }
+
+  const softStopHit =
+    currentPrice <= Number(position.soft_stop_price || 0) ||
+    pnlPercent <= -config.bot.softStopPercent;
+
+  const softTakeHit =
+    currentPrice >= Number(position.soft_take_price || 0) ||
+    pnlPercent >= config.bot.softTakePercent;
+
+  if (pnlPercent < config.bot.minHoldProfitPct && !softStopHit) {
     await writeLog({
       market: position.market,
       actionType: 'HOLD',
@@ -563,17 +760,23 @@ async function tryManageOpenPosition() {
       rsiValue: feature.rsi,
       coinBalance,
       pnlPercent,
-      message: `0.3% 미만 보유 / holdMinutes=${holdMinutes} / pnl=${pnlPercent.toFixed(4)}`,
+      message:
+        `${config.bot.minHoldProfitPct}% 미만 보유 / holdMinutes=${holdMinutes}` +
+        ` / pnl=${pnlPercent.toFixed(4)}`,
       rawJson: { feature },
     });
     return;
   }
 
-  // 4) 0.3% 이상이면서 횡보가 30~50분 지속되면 매도
   const sideways = isSidewaysMarket(feature);
   const sidewaysExitMinutes = getSidewaysExitMinutes(pnlPercent);
 
-  if (sideways && holdMinutes >= sidewaysExitMinutes) {
+  if (
+    pnlPercent >= config.bot.minHoldProfitPct &&
+    !softTakeHit &&
+    sideways &&
+    holdMinutes >= sidewaysExitMinutes
+  ) {
     await forceClosePosition(
       position,
       currentPrice,
@@ -592,9 +795,12 @@ async function tryManageOpenPosition() {
     return;
   }
 
-  // 5) 0.3% 이상 ~ 5% 미만은 AI가 계속 갈지/팔지 판단
+  let exitType = 'PROFIT_ZONE';
+  if (softStopHit) exitType = 'STOP_ZONE';
+  if (softTakeHit) exitType = 'TAKE_ZONE';
+
   const exitAi = await getExitDecision({
-    type: 'PROFIT_ZONE',
+    type: exitType,
     market: position.market,
     currentPrice,
     buyPrice: Number(position.buy_price),
@@ -615,6 +821,113 @@ async function tryManageOpenPosition() {
     holdMinutes,
   });
 
+  if (exitType === 'STOP_ZONE') {
+    const canExtend =
+      exitAi &&
+      exitAi.action === 'HOLD' &&
+      exitAi.confidence >= 75 &&
+      exitAi.risk_level !== 'high' &&
+      Number(position.extend_count || 0) < config.bot.maxStopExtendCount;
+
+    if (canExtend) {
+      const holdMinutesByAi = Math.min(
+        config.bot.maxStopExtendMinutes,
+        Number(exitAi.max_hold_minutes || 0)
+      );
+
+      const holdUntil = plusMinutes(nowSeoul(), holdMinutesByAi || 1);
+
+      await updatePositionMeta(position.id, {
+        extend_count: Number(position.extend_count || 0) + 1,
+        ai_hold_until: toMySqlDate(holdUntil),
+      });
+
+      await writeLog({
+        market: position.market,
+        actionType: 'STOP_EXTEND',
+        price: currentPrice,
+        rsiValue: feature.rsi,
+        coinBalance,
+        pnlPercent,
+        message: `AI 연장보유 ${holdMinutesByAi}분 / ${exitAi.reason || ''}`,
+        rawJson: exitAi,
+      });
+      return;
+    }
+
+    await forceClosePosition(
+      position,
+      currentPrice,
+      coinBalance,
+      'SOFT_STOP',
+      {
+        exitAi,
+        pnlPercent,
+        holdMinutes,
+      }
+    );
+    return;
+  }
+
+  if (exitType === 'TAKE_ZONE') {
+    const canTrail =
+      exitAi &&
+      exitAi.action === 'HOLD' &&
+      exitAi.confidence >= 75 &&
+      exitAi.risk_level === 'low';
+
+    if (canTrail) {
+      const trailingPct = clamp(
+        Number(exitAi.trail_stop_percent || config.bot.trailingStopMin),
+        config.bot.trailingStopMin,
+        config.bot.trailingStopMax
+      );
+
+      const holdMinutesByAi = Math.min(
+        config.bot.maxTakeExtendMinutes,
+        Number(exitAi.max_hold_minutes || 0)
+      );
+
+      const holdUntil = plusMinutes(nowSeoul(), holdMinutesByAi || 1);
+
+      await updatePositionMeta(position.id, {
+        trailing_mode: 'Y',
+        trailing_stop_percent: trailingPct,
+        highest_price: Math.max(
+          Number(position.highest_price || 0),
+          currentPrice,
+          Number(position.buy_price || 0)
+        ),
+        ai_hold_until: toMySqlDate(holdUntil),
+      });
+
+      await writeLog({
+        market: position.market,
+        actionType: 'TAKE_EXTEND',
+        price: currentPrice,
+        rsiValue: feature.rsi,
+        coinBalance,
+        pnlPercent,
+        message: `AI 연장보유 / trailing=${trailingPct}% / ${exitAi.reason || ''}`,
+        rawJson: exitAi,
+      });
+      return;
+    }
+
+    await forceClosePosition(
+      position,
+      currentPrice,
+      coinBalance,
+      'SOFT_TAKE',
+      {
+        exitAi,
+        pnlPercent,
+        holdMinutes,
+      }
+    );
+    return;
+  }
+
   if (exitAi && exitAi.action === 'SELL') {
     await forceClosePosition(
       position,
@@ -630,7 +943,6 @@ async function tryManageOpenPosition() {
     return;
   }
 
-  // 6) AI가 더 갈 수 있다 보면 보유
   if (exitAi && exitAi.action === 'HOLD') {
     await writeLog({
       market: position.market,
@@ -639,13 +951,15 @@ async function tryManageOpenPosition() {
       rsiValue: feature.rsi,
       coinBalance,
       pnlPercent,
-      message: `AI 보유 / pnl=${pnlPercent.toFixed(4)} / holdMinutes=${holdMinutes} / reason=${exitAi.reason || ''}`,
+      message:
+        `AI 보유 / pnl=${pnlPercent.toFixed(4)}` +
+        ` / holdMinutes=${holdMinutes}` +
+        ` / reason=${exitAi.reason || ''}`,
       rawJson: exitAi,
     });
     return;
   }
 
-  // 7) AI 응답이 애매하면 기본 보유
   await writeLog({
     market: position.market,
     actionType: 'HOLD',

@@ -33,7 +33,7 @@ const config = {
   },
 
   openai: {
-    apiKey: process.env.OPENAI_API_KEY,
+    apiKey: process.env.OPENAI_API_KEY || '',
     model: process.env.OPENAI_MODEL || 'gpt-5-mini',
   },
 
@@ -47,10 +47,13 @@ const config = {
   },
 
   bot: {
-    markets: (process.env.MARKETS || 'KRW-BTC')
+    markets: (process.env.MARKETS || 'KRW-BTC,KRW-ETH,KRW-XRP')
       .split(',')
-      .map(v => v.trim())
+      .map((v) => v.trim())
       .filter(Boolean),
+
+    useAllKrwMarkets: bool('USE_ALL_KRW_MARKETS', true),
+    excludeWarningMarkets: bool('EXCLUDE_WARNING_MARKETS', true),
 
     loopSeconds: num('LOOP_SECONDS', 20),
     dryRun: bool('DRY_RUN', true),
@@ -73,6 +76,18 @@ const config = {
 
     krwReserve: num('KRW_RESERVE', 1000),
     maxBuyKrw: num('MAX_BUY_KRW', 0),
+
+    minHoldProfitPct: num('MIN_HOLD_PROFIT_PCT', 0.3),
+
+    preTickerTopCount: num('PRE_TICKER_TOP_COUNT', 25),
+    topCandidateCount: num('TOP_CANDIDATE_COUNT', 10),
+    aiTargetCount: num('AI_TARGET_COUNT', 5),
+
+    min24hTradePrice: num('MIN_24H_TRADE_PRICE', 300000000),
+    minSignedChangePct: num('MIN_SIGNED_CHANGE_PCT', -12),
+    maxSignedChangePct: num('MAX_SIGNED_CHANGE_PCT', 25),
+    maxVolatilityPct: num('MAX_VOLATILITY_PCT', 8),
+    minVolumeRatio: num('MIN_VOLUME_RATIO', 0.05),
   },
 };
 

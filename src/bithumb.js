@@ -4,7 +4,7 @@ const crypto = require('crypto');
 const { v4: uuidv4 } = require('uuid');
 const config = require('./config');
 
-const BASE_URL = 'https://api.bithumb.com';
+const BASE_URL = config.bithumb.baseUrl;
 
 function buildQueryString(params = {}) {
   return Object.entries(params)
@@ -15,7 +15,7 @@ function buildQueryString(params = {}) {
 
 function createAuthHeader(params = {}) {
   const payload = {
-    access_key: process.env.BITHUMB_ACCESS_KEY,
+    access_key: config.bithumb.accessKey,
     nonce: uuidv4(),
     timestamp: Date.now(),
   };
@@ -30,7 +30,7 @@ function createAuthHeader(params = {}) {
     payload.query_hash_alg = 'SHA512';
   }
 
-  const token = jwt.sign(payload, process.env.BITHUMB_SECRET_KEY);
+  const token = jwt.sign(payload, config.bithumb.secretKey);
 
   return {
     Authorization: `Bearer ${token}`,
@@ -43,8 +43,6 @@ function toBithumbMarket(market) {
 }
 
 function fromLegacyCandleRow(row) {
-  // 구형 public/candlestick 응답이 배열인 경우 대응
-  // 보통 [timestamp, open, close, high, low, volume]
   const ts = Number(row[0]);
   const open = Number(row[1]);
   const close = Number(row[2]);
@@ -62,28 +60,77 @@ function fromLegacyCandleRow(row) {
   };
 }
 
-// ---------------- PUBLIC ----------------
+function chunkArray(arr, size) {
+  const result = [];
+  for (let i = 0; i < arr.length; i += size) {
+    result.push(arr.slice(i, i + size));
+  }
+  return result;
+}
 
 async function getTicker(market) {
   const target = toBithumbMarket(market);
   const res = await axios.get(`${BASE_URL}/v1/ticker`, {
     params: { markets: target },
+    timeout: 10000,
   });
   return res.data;
 }
 
+async function getTickers(markets = []) {
+  const chunks = chunkArray(markets.map(toBithumbMarket), 50);
+  const results = [];
+
+  for (const chunk of chunks) {
+    try {
+      const res = await axios.get(`${BASE_URL}/v1/ticker`, {
+        params: { markets: chunk.join(',') },
+        timeout: 10000,
+      });
+
+      if (Array.isArray(res.data)) {
+        results.push(...res.data);
+      } else if (res.data) {
+        results.push(res.data);
+      }
+    } catch (err) {
+      const perMarket = await Promise.all(
+        chunk.map(async (market) => {
+          try {
+            const row = await getTicker(market);
+            return Array.isArray(row) ? row[0] : row;
+          } catch (e) {
+            return null;
+          }
+        })
+      );
+
+      results.push(...perMarket.filter(Boolean));
+    }
+  }
+
+  return results;
+}
+
 async function getAllMarkets() {
-  const res = await axios.get(`${BASE_URL}/v1/market/all`);
-  return (res.data || [])
-    .map(item => item.market)
-    .filter(market => typeof market === 'string' && market.startsWith('KRW-'));
+  const res = await axios.get(`${BASE_URL}/v1/market/all`, {
+    timeout: 10000,
+  });
+
+  const rows = Array.isArray(res.data) ? res.data : [];
+  return rows
+    .filter((item) => typeof item.market === 'string' && item.market.startsWith('KRW-'))
+    .map((item) => ({ market: item.market }));
 }
 
 async function getWarningMarkets() {
   try {
-    const res = await axios.get(`${BASE_URL}/v1/market/virtual_asset_warning`);
+    const res = await axios.get(`${BASE_URL}/v1/market/virtual_asset_warning`, {
+      timeout: 10000,
+    });
+
     return (res.data || [])
-      .map(item => item.market)
+      .map((item) => item.market)
       .filter(Boolean);
   } catch (err) {
     return [];
@@ -93,44 +140,39 @@ async function getWarningMarkets() {
 async function getMinuteCandles(market, unit = 1, count = 120) {
   const target = toBithumbMarket(market);
 
-  // 1순위: 신규 v1 캔들 엔드포인트 시도
   try {
     const res = await axios.get(`${BASE_URL}/v1/candles/minutes/${unit}`, {
       params: {
         market: target,
         count,
       },
+      timeout: 10000,
     });
 
     const rows = Array.isArray(res.data) ? res.data : [];
-
     if (rows.length) {
       return rows;
     }
   } catch (err) {
-    // fallback below
+    // fallback
   }
 
-  // 2순위: 현재 사용 중이던 구형 public candlestick fallback
   const symbol = target.replace('KRW-', '');
   const legacy = await axios.get(
-    `${BASE_URL}/public/candlestick/${symbol}_KRW/${unit}m`
+    `${BASE_URL}/public/candlestick/${symbol}_KRW/${unit}m`,
+    { timeout: 10000 }
   );
 
   const legacyRows = legacy?.data?.data || [];
   return legacyRows.map(fromLegacyCandleRow);
 }
 
-// 기존 코드 호환용
-async function getCandles(market) {
-  return getMinuteCandles(market, 1, 120);
-}
-
-// ---------------- PRIVATE ----------------
-
 async function getAccounts() {
   const headers = createAuthHeader();
-  const res = await axios.get(`${BASE_URL}/v1/accounts`, { headers });
+  const res = await axios.get(`${BASE_URL}/v1/accounts`, {
+    headers,
+    timeout: 10000,
+  });
   return res.data;
 }
 
@@ -143,6 +185,7 @@ async function getOrderChance(market) {
   const res = await axios.get(`${BASE_URL}/v1/orders/chance`, {
     headers,
     params,
+    timeout: 10000,
   });
 
   return res.data;
@@ -155,6 +198,7 @@ async function getOrder(uuid) {
   const res = await axios.get(`${BASE_URL}/v1/order`, {
     headers,
     params,
+    timeout: 10000,
   });
 
   return res.data;
@@ -176,6 +220,7 @@ async function marketBuy(market, krwAmount) {
 
   const res = await axios.post(`${BASE_URL}/v1/orders`, body, {
     headers,
+    timeout: 10000,
   });
 
   return res.data;
@@ -197,13 +242,14 @@ async function marketSell(market, volume) {
 
   const res = await axios.post(`${BASE_URL}/v1/orders`, body, {
     headers,
+    timeout: 10000,
   });
 
   return res.data;
 }
 
 function findBalance(accounts, currency) {
-  const item = (accounts || []).find(v => v.currency === currency);
+  const item = (accounts || []).find((v) => v.currency === currency);
   return item ? Number(item.balance) : 0;
 }
 
@@ -213,7 +259,7 @@ function getBaseCurrency(market) {
 
 module.exports = {
   getTicker,
-  getCandles,
+  getTickers,
   getMinuteCandles,
   getAllMarkets,
   getWarningMarkets,

@@ -71,6 +71,7 @@ async function start() {
 
   console.log('=== AI Hybrid Trader Start ===');
   console.log('EXCHANGE:', config.exchange);
+  console.log('USE_ALL_KRW_MARKETS:', config.bot.useAllKrwMarkets);
   console.log('MARKETS:', config.bot.markets.join(', '));
   console.log('DRY_RUN:', config.bot.dryRun);
   console.log('LOOP_SECONDS:', config.bot.loopSeconds);
@@ -78,7 +79,10 @@ async function start() {
   await writeLog({
     market: 'SYSTEM',
     actionType: 'START',
-    message: `bot started / exchange=${config.exchange} / dryRun=${config.bot.dryRun} / loopSeconds=${config.bot.loopSeconds}`,
+    message:
+      `bot started / exchange=${config.exchange} / dryRun=${config.bot.dryRun}` +
+      ` / loopSeconds=${config.bot.loopSeconds}` +
+      ` / useAllKrwMarkets=${config.bot.useAllKrwMarkets}`,
   });
 
   while (true) {

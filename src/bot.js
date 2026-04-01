@@ -3,16 +3,54 @@ const { writeLog, getOpenPosition } = require('./db');
 const { tryOpenPosition, tryManageOpenPosition } = require('./trader');
 
 function sleep(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function oneCycle() {
-  const openPosition = await getOpenPosition();
+let isRunningCycle = false;
 
-  if (openPosition) {
-    await tryManageOpenPosition();
-  } else {
-    await tryOpenPosition();
+async function oneCycle() {
+  if (isRunningCycle) {
+    await writeLog({
+      market: 'SYSTEM',
+      actionType: 'SKIP_CYCLE',
+      message: '이전 사이클이 아직 실행 중이라 이번 루프는 건너뜀',
+    });
+    return;
+  }
+
+  isRunningCycle = true;
+  const startedAt = Date.now();
+
+  try {
+    const openPosition = await getOpenPosition();
+
+    if (openPosition) {
+      await writeLog({
+        market: openPosition.market || 'SYSTEM',
+        actionType: 'CYCLE',
+        message: 'open position exists -> manage mode',
+      });
+
+      await tryManageOpenPosition();
+    } else {
+      await writeLog({
+        market: 'SYSTEM',
+        actionType: 'CYCLE',
+        message: 'no open position -> entry scan mode',
+      });
+
+      await tryOpenPosition();
+    }
+
+    const elapsedMs = Date.now() - startedAt;
+
+    await writeLog({
+      market: 'SYSTEM',
+      actionType: 'CYCLE_DONE',
+      message: `cycle completed / elapsedMs=${elapsedMs}`,
+    });
+  } finally {
+    isRunningCycle = false;
   }
 }
 
@@ -40,7 +78,7 @@ async function start() {
   await writeLog({
     market: 'SYSTEM',
     actionType: 'START',
-    message: `bot started / exchange=${config.exchange} / dryRun=${config.bot.dryRun}`,
+    message: `bot started / exchange=${config.exchange} / dryRun=${config.bot.dryRun} / loopSeconds=${config.bot.loopSeconds}`,
   });
 
   while (true) {

@@ -56,8 +56,8 @@ const config = {
     dryRun: bool('DRY_RUN', true),
 
     rsiPeriod: num('RSI_PERIOD', 14),
-    buyRsiMax: num('BUY_RSI_MAX', 35),
-    aiBuyScoreMin: num('AI_BUY_SCORE_MIN', 75),
+    buyRsiMax: num('BUY_RSI_MAX', 60),
+    aiBuyScoreMin: num('AI_BUY_SCORE_MIN', 45),
 
     softStopPercent: num('SOFT_STOP_PERCENT', 5),
     softTakePercent: num('SOFT_TAKE_PERCENT', 5),

@@ -25,7 +25,6 @@ function calculateRSI(closes, period = 14) {
   }
 
   if (avgLoss === 0) return 100;
-
   const rs = avgGain / avgLoss;
   return 100 - (100 / (1 + rs));
 }
@@ -85,10 +84,10 @@ function buildFeaturesFromCandles(candles, rsiPeriod = 14) {
   }
 
   const ordered = candles.slice().reverse();
-  const closes = ordered.map((v) => Number(v.trade_price));
-  const highs = ordered.map((v) => Number(v.high_price));
-  const lows = ordered.map((v) => Number(v.low_price));
-  const volumes = ordered.map((v) => Number(v.candle_acc_trade_volume));
+  const closes = ordered.map(v => Number(v.trade_price));
+  const highs = ordered.map(v => Number(v.high_price));
+  const lows = ordered.map(v => Number(v.low_price));
+  const volumes = ordered.map(v => Number(v.candle_acc_trade_volume));
 
   const latestPrice = closes[closes.length - 1];
   const prevPrice = closes[closes.length - 2];

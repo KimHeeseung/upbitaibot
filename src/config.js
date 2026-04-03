@@ -15,25 +15,15 @@ function bool(name, defaultValue = false) {
   return raw === 'true' || raw === '1' || raw === 'y';
 }
 
-const exchangeName = (process.env.EXCHANGE || 'upbit').toLowerCase();
-
 const config = {
-  exchange: exchangeName,
-
-  upbit: {
-    accessKey: process.env.UPBIT_ACCESS_KEY || '',
-    secretKey: process.env.UPBIT_SECRET_KEY || '',
-    baseUrl: 'https://api.upbit.com',
-  },
-
-  bithumb: {
-    accessKey: process.env.BITHUMB_ACCESS_KEY || '',
-    secretKey: process.env.BITHUMB_SECRET_KEY || '',
-    baseUrl: 'https://api.bithumb.com',
+  binance: {
+    apiKey: process.env.BINANCE_API_KEY,
+    secretKey: process.env.BINANCE_SECRET_KEY,
+    baseUrl: process.env.BINANCE_BASE_URL || 'https://api.binance.com',
   },
 
   openai: {
-    apiKey: process.env.OPENAI_API_KEY || '',
+    apiKey: process.env.OPENAI_API_KEY,
     model: process.env.OPENAI_MODEL || 'gpt-5-mini',
   },
 
@@ -47,20 +37,17 @@ const config = {
   },
 
   bot: {
-    markets: (process.env.MARKETS || 'KRW-BTC,KRW-ETH,KRW-XRP')
+    markets: (process.env.MARKETS || 'BTCUSDT')
       .split(',')
-      .map((v) => v.trim())
+      .map(v => v.trim().toUpperCase())
       .filter(Boolean),
-
-    useAllKrwMarkets: bool('USE_ALL_KRW_MARKETS', true),
-    excludeWarningMarkets: bool('EXCLUDE_WARNING_MARKETS', true),
 
     loopSeconds: num('LOOP_SECONDS', 20),
     dryRun: bool('DRY_RUN', true),
 
     rsiPeriod: num('RSI_PERIOD', 14),
-    buyRsiMax: num('BUY_RSI_MAX', 60),
-    aiBuyScoreMin: num('AI_BUY_SCORE_MIN', 45),
+    buyRsiMax: num('BUY_RSI_MAX', 35),
+    aiBuyScoreMin: num('AI_BUY_SCORE_MIN', 75),
 
     softStopPercent: num('SOFT_STOP_PERCENT', 5),
     softTakePercent: num('SOFT_TAKE_PERCENT', 5),
@@ -74,20 +61,9 @@ const config = {
     trailingStopMin: num('TRAILING_STOP_MIN', 1.0),
     trailingStopMax: num('TRAILING_STOP_MAX', 2.0),
 
-    krwReserve: num('KRW_RESERVE', 1000),
-    maxBuyKrw: num('MAX_BUY_KRW', 0),
-
-    minHoldProfitPct: num('MIN_HOLD_PROFIT_PCT', 0.3),
-
-    preTickerTopCount: num('PRE_TICKER_TOP_COUNT', 25),
-    topCandidateCount: num('TOP_CANDIDATE_COUNT', 10),
-    aiTargetCount: num('AI_TARGET_COUNT', 5),
-
-    min24hTradePrice: num('MIN_24H_TRADE_PRICE', 300000000),
-    minSignedChangePct: num('MIN_SIGNED_CHANGE_PCT', -12),
-    maxSignedChangePct: num('MAX_SIGNED_CHANGE_PCT', 25),
-    maxVolatilityPct: num('MAX_VOLATILITY_PCT', 8),
-    minVolumeRatio: num('MIN_VOLUME_RATIO', 0.05),
+    quoteAsset: process.env.QUOTE_ASSET || 'USDT',
+    quoteReserve: num('QUOTE_RESERVE', 10),
+    minNotionalBuffer: num('MIN_NOTIONAL_BUFFER', 1),
   },
 };
 

@@ -38,7 +38,6 @@ async function writeLog({
       (market, action_type, price, rsi_value, krw_balance, coin_balance, pnl_percent, message, raw_json)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
   `;
-
   await execute(sql, [
     market,
     actionType,
@@ -85,7 +84,6 @@ async function openPosition(data) {
       ?, ?, ?, ?
     )
   `;
-
   return execute(sql, [
     data.market,
     data.buyPrice,
@@ -165,7 +163,6 @@ async function closePosition({
       closed_at = NOW()
     WHERE id = ?
   `;
-
   return execute(sql, [
     sellPrice,
     sellVolume,

@@ -36,7 +36,7 @@ async function getEntryDecision(feature) {
     {
       role: 'developer',
       content:
-        '너는 암호화폐 단기매매 보조 분석기다. 반드시 JSON만 반환한다. 공격적 추격매수보다 리스크 관리 우선.',
+        '너는 암호화폐 단기매매 보조 분석기다. 반드시 JSON만 반환한다. 설명문 금지. 공격적 추격매수보다 리스크 관리 우선.',
     },
     {
       role: 'user',
@@ -47,10 +47,10 @@ async function getEntryDecision(feature) {
 - BUY / HOLD / AVOID 중 하나를 반환
 - score는 0~100
 - risk_level은 low / medium / high
-- 급등 추격은 감점
-- 거래량 증가, 과매도 반등, 단기 추세 회복은 가점
-- 애매하면 HOLD 또는 AVOID
-- 변동성이 과도하면 보수적으로 판단
+- score가 높아도 변동성이 과도하면 보수적으로 판단
+- 이미 급등한 종목 추격은 감점
+- 거래량 증가, 과매도 반등, 추세 회복은 가점
+- 너무 애매하면 HOLD 또는 AVOID
 
 입력:
 ${JSON.stringify(feature)}
@@ -82,14 +82,7 @@ ${JSON.stringify(feature)}
               items: { type: 'string' },
             },
           },
-          required: [
-            'market_regime',
-            'action',
-            'score',
-            'risk_level',
-            'reasons',
-            'warnings',
-          ],
+          required: ['market_regime', 'action', 'score', 'risk_level', 'reasons', 'warnings'],
         },
       },
     },
@@ -123,16 +116,15 @@ async function getExitDecision(input) {
     {
       role: 'user',
       content: `
-현재 포지션 청산 판단을 내려라.
+현재 포지션의 청산 판단을 내려라.
 
 규칙:
 - action은 SELL 또는 HOLD
 - confidence는 0~100
-- STOP_ZONE에서는 위험하면 빠르게 SELL
-- TAKE_ZONE에서는 추세가 강하면 HOLD 허용
-- PROFIT_ZONE에서는 무리한 조기매도 지양
+- 손절 구간에서는 리스크가 높으면 반드시 SELL
+- 익절 구간에서는 추세가 강하면 HOLD 허용
 - HOLD를 주더라도 max_hold_minutes는 보수적으로
-- trail_stop_percent는 0~3 숫자
+- trail_stop_percent는 0~3 사이 숫자
 - reason은 짧고 명확하게
 
 입력:
